@@ -1,63 +1,22 @@
 import express from "express";
-import { randomUUID } from "node:crypto";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import {
-  StreamableHTTPServerTransport,
-  isInitializeRequest,
-} from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-
-import {
-  ListToolsRequestSchema,
-  CallToolRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
-
-/**
- * ENV:
- * OPS_BASE_URL = https://hr.estedama-sa.com/api
- * OPS_KEY      = <X-Ops-Key value>
- * (optional) MCP_ACCESS_TOKEN = <token for Agent Builder to send as Bearer>
- * PORT = 3000 (Render sets it automatically)
- */
-
-const OPS_BASE_URL_RAW = process.env.OPS_BASE_URL || "";
-const OPS_KEY = process.env.OPS_KEY || "";
-const MCP_ACCESS_TOKEN = process.env.MCP_ACCESS_TOKEN || "";
-
-const OPS_BASE_URL = OPS_BASE_URL_RAW.replace(/\/+$/, ""); // remove trailing slash
+const OPS_BASE_URL = process.env.OPS_BASE_URL; // مثال: https://hr.estedama-sa.com/api
+const OPS_KEY = process.env.OPS_KEY;
 const PORT = Number(process.env.PORT || 3000);
+
+// (اختياري) لحماية MCP endpoint من أي أحد
+// إذا وضعته: لازم ترسله من OpenAI كـ Authorization: Bearer <token>
+const MCP_TOKEN = process.env.MCP_TOKEN || null;
 
 if (!OPS_BASE_URL || !OPS_KEY) {
   console.error("Missing OPS_BASE_URL or OPS_KEY env vars");
   process.exit(1);
 }
 
-// ---- optional auth for MCP endpoint (recommended later, not mandatory now)
-function requireMcpAuth(req, res, next) {
-  if (!MCP_ACCESS_TOKEN) return next(); // auth disabled
-
-  const auth = req.headers["authorization"] || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-
-  if (token && token === MCP_ACCESS_TOKEN) return next();
-
-  // allow alternative header if you prefer Custom headers:
-  const xApiKey = req.headers["x-api-key"];
-  if (xApiKey && xApiKey === MCP_ACCESS_TOKEN) return next();
-
-  return res.status(401).send("Unauthorized");
-}
-
-// ---- CORS (Agent Builder / browsers may preflight OPTIONS)
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, mcp-session-id, x-api-key");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
-}
-
 async function opsFetch(path, { method = "GET", body } = {}) {
   const url = `${OPS_BASE_URL}${path}`;
-
   const res = await fetch(url, {
     method,
     headers: {
@@ -75,170 +34,114 @@ async function opsFetch(path, { method = "GET", body } = {}) {
   }
 }
 
-const app = express();
-app.use(express.json({ limit: "1mb" }));
+function requireMcpAuth(req, res) {
+  if (!MCP_TOKEN) return true; // لا يوجد حماية مفعلة
 
-// health
-app.get("/", (req, res) => res.send("OK"));
-
-// --- MCP Server
-const mcpServer = new Server(
-  { name: "hr-ops-mcp", version: "1.0.0" },
-  { capabilities: { tools: {} } }
-);
-
-// tools/list
-mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: "ops_health",
-      description: "Health check for Ops Gateway",
-      inputSchema: { type: "object", properties: {} },
-    },
-    {
-      name: "ops_tail_log",
-      description: "Tail laravel.log via Ops Gateway",
-      inputSchema: {
-        type: "object",
-        properties: { lines: { type: "integer", default: 200 } },
-      },
-    },
-    {
-      name: "ops_run_artisan",
-      description: "Run an allowlisted artisan command",
-      inputSchema: {
-        type: "object",
-        properties: { command: { type: "string" } },
-        required: ["command"],
-      },
-    },
-    {
-      name: "ops_db_select",
-      description: "Run SELECT query (read-only)",
-      inputSchema: {
-        type: "object",
-        properties: { sql: { type: "string" } },
-        required: ["sql"],
-      },
-    },
-    {
-      name: "ops_read_file",
-      description: "Read an allowed server-side file path",
-      inputSchema: {
-        type: "object",
-        properties: { path: { type: "string" } },
-        required: ["path"],
-      },
-    },
-  ],
-}));
-
-// tools/call
-mcpServer.setRequestHandler(CallToolRequestSchema, async (req) => {
-  const { name, arguments: args } = req.params;
-
-  if (name === "ops_health") {
-    const r = await opsFetch("/ops/health");
-    return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+  const auth = req.headers.authorization || "";
+  const ok = auth === `Bearer ${MCP_TOKEN}`;
+  if (!ok) {
+    res.status(401).send("Unauthorized");
+    return false;
   }
-
-  if (name === "ops_tail_log") {
-    const lines = Math.max(10, Math.min(Number(args?.lines ?? 200), 2000));
-    const r = await opsFetch(`/ops/log/tail?lines=${lines}`);
-    return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
-  }
-
-  if (name === "ops_run_artisan") {
-    const command = String(args?.command ?? "");
-    const r = await opsFetch("/ops/artisan", { method: "POST", body: { command } });
-    return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
-  }
-
-  if (name === "ops_db_select") {
-    const sql = String(args?.sql ?? "");
-    const r = await opsFetch("/ops/db/select", { method: "POST", body: { sql } });
-    return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
-  }
-
-  if (name === "ops_read_file") {
-    const path = encodeURIComponent(String(args?.path ?? ""));
-    const r = await opsFetch(`/ops/file?path=${path}`);
-    return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
-  }
-
-  return { content: [{ type: "text", text: `Unknown tool: ${name}` }] };
-});
-
-// --- Streamable HTTP session store
-const transports = new Map(); // sessionId -> transport
-
-// OPTIONS (CORS preflight)
-app.options("/mcp", (req, res) => {
-  setCors(res);
-  res.status(204).send();
-});
-
-// POST: init + client->server messages
-app.post("/mcp", requireMcpAuth, async (req, res) => {
-  try {
-    setCors(res);
-
-    const sessionId = req.headers["mcp-session-id"];
-    let transport;
-
-    if (sessionId && transports.has(sessionId)) {
-      transport = transports.get(sessionId);
-    } else if (!sessionId && isInitializeRequest(req.body)) {
-      transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (newSessionId) => {
-          transports.set(newSessionId, transport);
-        },
-      });
-
-      transport.onclose = () => {
-        if (transport.sessionId) transports.delete(transport.sessionId);
-      };
-
-      await mcpServer.connect(transport);
-    } else {
-      res.status(400).json({
-        jsonrpc: "2.0",
-        error: { code: -32000, message: "Bad Request: No valid session ID provided" },
-        id: null,
-      });
-      return;
-    }
-
-    await transport.handleRequest(req, res, req.body);
-  } catch (e) {
-    console.error(e);
-    res.status(500).send("MCP error");
-  }
-});
-
-// GET/DELETE: streaming + close
-async function handleSessionRequest(req, res) {
-  try {
-    setCors(res);
-
-    const sessionId = req.headers["mcp-session-id"];
-    if (!sessionId || !transports.has(sessionId)) {
-      res.status(400).send("Invalid or missing session ID");
-      return;
-    }
-
-    const transport = transports.get(sessionId);
-    await transport.handleRequest(req, res);
-  } catch (e) {
-    console.error(e);
-    res.status(500).send("MCP error");
-  }
+  return true;
 }
 
-app.get("/mcp", requireMcpAuth, handleSessionRequest);
-app.delete("/mcp", requireMcpAuth, handleSessionRequest);
+/** نبني MCP server جديد لكل Session/Request لتجنب مشاكل الحالة */
+function buildMcpServer() {
+  const server = new McpServer({ name: "hr-ops-mcp", version: "1.0.0" });
+
+  server.tool("ops_health", "Health check for Ops Gateway", async () => {
+    const r = await opsFetch("/ops/health");
+    return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+  });
+
+  server.tool(
+    "ops_tail_log",
+    "Tail laravel.log via Ops Gateway",
+    { lines: { type: "number", default: 200, description: "10..2000" } },
+    async ({ lines = 200 } = {}) => {
+      const n = Math.max(10, Math.min(Number(lines || 200), 2000));
+      const r = await opsFetch(`/ops/log/tail?lines=${n}`);
+      return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "ops_run_artisan",
+    "Run an allowlisted artisan command",
+    { command: { type: "string" } },
+    async ({ command } = {}) => {
+      const r = await opsFetch("/ops/artisan", { method: "POST", body: { command } });
+      return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "ops_db_select",
+    "Run SELECT query (read-only)",
+    { sql: { type: "string" } },
+    async ({ sql } = {}) => {
+      const r = await opsFetch("/ops/db/select", { method: "POST", body: { sql } });
+      return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "ops_read_file",
+    "Read an allowed server-side file path",
+    { path: { type: "string" } },
+    async ({ path } = {}) => {
+      const enc = encodeURIComponent(path || "");
+      const r = await opsFetch(`/ops/file?path=${enc}`);
+      return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+    }
+  );
+
+  return server;
+}
+
+const app = express();
+
+// مهم: نحتاج body للـ /mcp (JSON) عشان نمرره لـ transport.handleRequest
+app.use(express.json({ limit: "1mb" }));
+
+app.get("/", (_req, res) => res.status(200).send("OK"));
+app.get("/health", (_req, res) => res.status(200).json({ ok: true }));
+
+// لاحظ: استخدمنا app.all عشان OpenAI/العملاء قد يستخدمون POST غالبًا، لكن خلّه مرن
+app.all("/mcp", async (req, res) => {
+  try {
+    if (!requireMcpAuth(req, res)) return;
+
+    // 1) ننشئ Transport
+    const transport = new StreamableHTTPServerTransport({
+      // sessionIdGenerator: undefined  // الافتراضي جيد
+    });
+
+    // 2) ننشئ MCP Server
+    const server = buildMcpServer();
+
+    // 3) نربطهم
+    await server.connect(transport);
+
+    // 4) أهم سطرين: مرّر الطلب_toggle للـ transport
+    await transport.handleRequest(req, res, req.body);
+
+    // 5) تنظيف
+    res.on("close", async () => {
+      try {
+        await transport.close();
+      } catch {}
+      try {
+        await server.close();
+      } catch {}
+    });
+  } catch (e) {
+    console.error("MCP error:", e);
+    if (!res.headersSent) res.status(500).send("MCP error");
+  }
+});
 
 app.listen(PORT, () => {
-  console.log(`MCP server listening on ${PORT}`);
+  console.log(`hr-ops-mcp listening on port ${PORT}`);
 });
