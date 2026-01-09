@@ -1,6 +1,10 @@
 import express from "express";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
  
 
 const OPS_BASE_URL = process.env.OPS_BASE_URL; // مثال: https://hr.estedama-sa.com/api
@@ -39,7 +43,7 @@ const server = new Server(
   { capabilities: { tools: {} } }
 );
 
-server.setRequestHandler("tools/list", async () => ({
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     { name: "ops_health", description: "Health check for Ops Gateway", inputSchema: { type: "object", properties: {} } },
     {
@@ -65,7 +69,7 @@ server.setRequestHandler("tools/list", async () => ({
   ],
 }));
 
-server.setRequestHandler("tools/call", async (req) => {
+server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args } = req.params;
 
   if (name === "ops_health") {
@@ -97,6 +101,7 @@ server.setRequestHandler("tools/call", async (req) => {
 
   return { content: [{ type: "text", text: `Unknown tool: ${name}` }] };
 });
+
 
 app.post("/mcp", async (req, res) => {
   try {
