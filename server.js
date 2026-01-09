@@ -6,6 +6,7 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
+// إعدادات البيئة
 const OPS_BASE_URL_RAW = process.env.OPS_BASE_URL || "";
 const OPS_KEY = process.env.OPS_KEY || "";
 const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || ""; 
@@ -17,6 +18,7 @@ if (!OPS_BASE_URL || !OPS_KEY) {
   console.error("Error: Missing OPS_BASE_URL or OPS_KEY");
 }
 
+// دالة التحقق من التوكن (الحماية)
 function checkMcpAuth(req, res) {
   if (!MCP_AUTH_TOKEN) return true;
   const auth = req.headers.authorization || "";
@@ -27,6 +29,7 @@ function checkMcpAuth(req, res) {
   return false;
 }
 
+// دالة الاتصال بـ Laravel
 async function opsFetch(path, { method = "GET", body } = {}) {
   const url = `${OPS_BASE_URL}${path}`;
   try {
@@ -43,47 +46,51 @@ async function opsFetch(path, { method = "GET", body } = {}) {
   }
 }
 
+// --- تعريف السيرفر والأدوات ---
 const mcp = new McpServer({ name: "hr-ops-mcp", version: "1.2.0" });
 
-// --- تعريف الأدوات ---
-
+// 1. Health
 mcp.tool("ops_health", "Health check", z.object({}), async () => {
   const r = await opsFetch("/ops/health");
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
+// 2. Tail Log
 mcp.tool("ops_tail_log", "Read log", z.object({ lines: z.number().default(200) }), async ({ lines }) => {
   const r = await opsFetch(`/ops/log/tail?lines=${lines}`);
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
+// 3. Artisan
 mcp.tool("ops_run_artisan", "Run artisan", z.object({ command: z.string() }), async ({ command }) => {
   const r = await opsFetch("/ops/artisan", { method: "POST", body: { command } });
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
+// 4. DB Select
 mcp.tool("ops_db_select", "Run SELECT SQL", z.object({ sql: z.string() }), async ({ sql }) => {
   const r = await opsFetch("/ops/db/select", { method: "POST", body: { sql } });
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
+// 5. Read File
 mcp.tool("ops_read_file", "Read file", z.object({ path: z.string() }), async ({ path }) => {
   const r = await opsFetch(`/ops/file?path=${encodeURIComponent(path)}`);
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
+// 6. List Files (الأداة المهمة جداً)
 mcp.tool("ops_list_files", "List files in directory", z.object({ path: z.string() }), async ({ path }) => {
   const r = await opsFetch(`/ops/files?path=${encodeURIComponent(path)}`);
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
-// --- إعداد السيرفر ---
-
+// --- إعداد HTTP Server (هنا كان الخطأ وتم إصلاحه) ---
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
-app.get("/", (req, res) => res.send("MCP Server OK - Fixed Version 🚀"));
+app.get("/", (req, res) => res.send("MCP Server Fixed & Running 🚀"));
 
 const transports = new Map();
 
@@ -96,11 +103,11 @@ app.post("/mcp", async (req, res) => {
     if (sessionId && transports.has(sessionId)) {
       transport = transports.get(sessionId);
     } else {
-      // FIX: استبدال الدالة التي سببت المشكلة بفحص يدوي لنوع الطلب
-      // نتأكد أن الطلب هو "initialize" لإنشاء جلسة جديدة
+      // FIX: هذا هو التعديل. نتحقق يدوياً بدلاً من استخدام الدالة المكسورة
+      // نتأكد أن الطلب هو "initialize"
       if (req.body?.method !== "initialize") {
-         res.status(400).send("Bad Request: Expected initialize method for new session");
-         return;
+         // إذا لم يكن initialize وليس لدينا جلسة، فهذا خطأ
+         // لكن أحياناً OpenAI يرسل طلبات أخرى، لذا سنحاول إنشاء جلسة احتياطاً
       }
 
       transport = new StreamableHTTPServerTransport({
