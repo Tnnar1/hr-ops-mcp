@@ -15,7 +15,6 @@ const OPS_BASE_URL = OPS_BASE_URL_RAW.replace(/\/+$/, "");
 
 if (!OPS_BASE_URL || !OPS_KEY) {
   console.error("Error: Missing OPS_BASE_URL or OPS_KEY");
-  // لا نوقف السيرفر حتى لو فيه خطأ في الإعدادات عشان ما يختفي من OpenAI، بس نطبع خطأ
 }
 
 function checkMcpAuth(req, res) {
@@ -46,7 +45,8 @@ async function opsFetch(path, { method = "GET", body } = {}) {
 
 const mcp = new McpServer({ name: "hr-ops-mcp", version: "1.2.0" });
 
-// تعريف الأدوات
+// --- تعريف الأدوات ---
+
 mcp.tool("ops_health", "Health check", z.object({}), async () => {
   const r = await opsFetch("/ops/health");
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
@@ -72,17 +72,18 @@ mcp.tool("ops_read_file", "Read file", z.object({ path: z.string() }), async ({ 
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
-// الأداة الجديدة التي سببت المشكلة (تأكد من كتابتها صح)
 mcp.tool("ops_list_files", "List files in directory", z.object({ path: z.string() }), async ({ path }) => {
   const r = await opsFetch(`/ops/files?path=${encodeURIComponent(path)}`);
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
+// --- إعداد السيرفر ---
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
-app.get("/", (req, res) => res.send("MCP Server OK"));
+app.get("/", (req, res) => res.send("MCP Server OK - Fixed Version 🚀"));
 
 const transports = new Map();
 
@@ -91,24 +92,37 @@ app.post("/mcp", async (req, res) => {
   try {
     const sessionId = (req.headers["mcp-session-id"] || "").toString();
     let transport;
+
     if (sessionId && transports.has(sessionId)) {
       transport = transports.get(sessionId);
     } else {
-       transport = new StreamableHTTPServerTransport({
+      // FIX: استبدال الدالة التي سببت المشكلة بفحص يدوي لنوع الطلب
+      // نتأكد أن الطلب هو "initialize" لإنشاء جلسة جديدة
+      if (req.body?.method !== "initialize") {
+         res.status(400).send("Bad Request: Expected initialize method for new session");
+         return;
+      }
+
+      transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
         onsessioninitialized: (id) => transports.set(id, transport),
       });
+      
       transport.onclose = () => { if (transport.sessionId) transports.delete(transport.sessionId); };
       await mcp.connect(transport);
     }
+    
     await transport.handleRequest(req, res, req.body);
-  } catch (e) { console.error(e); res.status(500).send("Err"); }
+  } catch (e) { 
+    console.error("MCP Error:", e); 
+    if (!res.headersSent) res.status(500).send("Internal Server Error"); 
+  }
 });
 
 app.get("/mcp", async (req, res) => {
   if (!checkMcpAuth(req, res)) return;
   const transport = transports.get((req.headers["mcp-session-id"] || "").toString());
-  if (!transport) return res.status(400).send("No session");
+  if (!transport) return res.status(400).send("No session found");
   await transport.handleRequest(req, res);
 });
 
