@@ -1,6 +1,6 @@
 import express from "express";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/transport/streamableHttp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/transport/streamableHttp.js"; 
 
 const OPS_BASE_URL = process.env.OPS_BASE_URL; // مثال: https://hr.estedama-sa.com/api
 const OPS_KEY      = process.env.OPS_KEY;
