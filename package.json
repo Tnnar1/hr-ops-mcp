@@ -1,6 +1,6 @@
 {
   "name": "hr-ops-mcp",
-  "version": "2.0.0",
+  "version": "3.1.0",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -8,11 +8,11 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.1",
-    "express": "^4.21.1",
     "cors": "^2.8.5",
+    "express": "^4.21.1",
     "zod": "^3.23.8"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20 <23"
   }
 }
