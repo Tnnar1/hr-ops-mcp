@@ -5,7 +5,7 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-// Setup
+// --- Configuration ---
 const OPS_BASE_URL = (process.env.OPS_BASE_URL || "").replace(/\/+$/, "");
 const OPS_KEY = process.env.OPS_KEY || "";
 const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || ""; 
@@ -13,7 +13,7 @@ const PORT = Number(process.env.PORT || 10000);
 
 if (!OPS_BASE_URL || !OPS_KEY) console.error("❌ Env Vars Missing!");
 
-// Fetch Helper
+// --- Fetch Helper ---
 async function opsFetch(path, options = {}) {
   const url = `${OPS_BASE_URL}${path}`;
   try {
@@ -26,9 +26,9 @@ async function opsFetch(path, options = {}) {
   } catch (err) { return { error: String(err) }; }
 }
 
-const mcp = new McpServer({ name: "hr-ops-mcp", version: "2.5.0" });
+const mcp = new McpServer({ name: "hr-ops-mcp", version: "2.6.0" });
 
-// --- Tools ---
+// --- Tools Definitions ---
 
 // 1. Health
 mcp.tool("ops_health", "Check health", z.object({}), async () => {
@@ -48,7 +48,7 @@ mcp.tool("ops_read_file", "Read file", z.object({ path: z.string() }), async ({ 
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
-// 4. Write File (New ✍️)
+// 4. Write File (The Fixer ✍️)
 mcp.tool("ops_write_file", "Write content to file (Full)", z.object({
   path: z.string().describe("Relative path e.g. app/Models/User.php"),
   content: z.string().describe("Full file content")
@@ -75,12 +75,12 @@ mcp.tool("ops_tail_log", "Read log", z.object({ lines: z.number().default(200) }
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
-// --- Server ---
+// --- Server & Transport Setup ---
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
-app.get("/", (req, res) => res.send("MCP Writer Active 🚀"));
+app.get("/", (req, res) => res.send("MCP Writer Mode Active (v2.6) 🚀"));
 
 const transports = new Map();
 
@@ -91,14 +91,32 @@ function checkAuth(req) {
   return h.includes(MCP_AUTH_TOKEN) || k.includes(MCP_AUTH_TOKEN);
 }
 
-app.post("/mcp", async (req, res) => {
+// 1. مسار GET (مهم جداً لفتح الاتصال SSE) - هذا ما كان ينقصك!
+app.get("/mcp", async (req, res) => {
   if (!checkAuth(req)) return res.status(401).send("Unauthorized");
+
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => crypto.randomUUID(),
     onsessioninitialized: (id) => transports.set(id, transport),
   });
+  
   transport.onclose = () => transports.delete(transport.sessionId);
+
   await mcp.connect(transport);
+  await transport.handleRequest(req, res);
+});
+
+// 2. مسار POST (مهم لاستقبال الأوامر JSON-RPC)
+app.post("/mcp", async (req, res) => {
+  if (!checkAuth(req)) return res.status(401).send("Unauthorized");
+
+  const sessionId = req.query.sessionId;
+  const transport = transports.get(String(sessionId));
+
+  if (!transport) {
+    return res.status(404).send("Session not found");
+  }
+
   await transport.handleRequest(req, res);
 });
 
