@@ -5,15 +5,15 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-// إعدادات البيئة
+// Setup
 const OPS_BASE_URL = (process.env.OPS_BASE_URL || "").replace(/\/+$/, "");
 const OPS_KEY = process.env.OPS_KEY || "";
 const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || ""; 
 const PORT = Number(process.env.PORT || 10000);
 
-if (!OPS_BASE_URL || !OPS_KEY) console.error("❌ Error: Missing OPS_BASE_URL or OPS_KEY");
+if (!OPS_BASE_URL || !OPS_KEY) console.error("❌ Env Vars Missing!");
 
-// دالة الاتصال المحسنة
+// Fetch Helper
 async function opsFetch(path, options = {}) {
   const url = `${OPS_BASE_URL}${path}`;
   try {
@@ -22,19 +22,21 @@ async function opsFetch(path, options = {}) {
       headers: { "Content-Type": "application/json", "X-Ops-Key": OPS_KEY, ...options.headers },
     });
     const text = await res.text();
-    try { return JSON.parse(text); } catch { return { error: "Invalid JSON", raw: text, status: res.status }; }
+    try { return JSON.parse(text); } catch { return { error: "Invalid JSON", raw: text }; }
   } catch (err) { return { error: String(err) }; }
 }
 
 const mcp = new McpServer({ name: "hr-ops-mcp", version: "2.5.0" });
 
+// --- Tools ---
+
 // 1. Health
-mcp.tool("ops_health", "Health check", z.object({}), async () => {
+mcp.tool("ops_health", "Check health", z.object({}), async () => {
   const r = await opsFetch("/ops/health");
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
-// 2. List Files (Updated)
+// 2. List Files
 mcp.tool("ops_list_files", "List files", z.object({ path: z.string() }), async ({ path }) => {
   const r = await opsFetch(`/ops/files?path=${encodeURIComponent(path)}`);
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
@@ -46,8 +48,8 @@ mcp.tool("ops_read_file", "Read file", z.object({ path: z.string() }), async ({ 
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
-// 4. [NEW] Write File (Engineer Tool) ✍️
-mcp.tool("ops_write_file", "Write content to file (Full/New)", z.object({
+// 4. Write File (New ✍️)
+mcp.tool("ops_write_file", "Write content to file (Full)", z.object({
   path: z.string().describe("Relative path e.g. app/Models/User.php"),
   content: z.string().describe("Full file content")
 }), async ({ path, content }) => {
@@ -62,7 +64,7 @@ mcp.tool("ops_run_artisan", "Run artisan", z.object({ command: z.string() }), as
 });
 
 // 6. DB Select
-mcp.tool("ops_db_select", "Run SELECT SQL", z.object({ sql: z.string() }), async ({ sql }) => {
+mcp.tool("ops_db_select", "Run SQL", z.object({ sql: z.string() }), async ({ sql }) => {
   const r = await opsFetch("/ops/db/select", { method: "POST", body: { sql } });
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
@@ -73,11 +75,12 @@ mcp.tool("ops_tail_log", "Read log", z.object({ lines: z.number().default(200) }
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
+// --- Server ---
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "50mb" })); // زيادة الحجم للملفات الكبيرة
+app.use(express.json({ limit: "50mb" }));
 
-app.get("/", (req, res) => res.send("MCP Server (Writer Mode) ✅"));
+app.get("/", (req, res) => res.send("MCP Writer Active 🚀"));
 
 const transports = new Map();
 
