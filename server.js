@@ -26,29 +26,26 @@ async function opsFetch(path, options = {}) {
   } catch (err) { return { error: String(err) }; }
 }
 
-const mcp = new McpServer({ name: "hr-ops-mcp", version: "2.6.0" });
+const mcp = new McpServer({ name: "hr-ops-mcp", version: "3.0.0" });
 
 // --- Tools Definitions ---
 
-// 1. Health
 mcp.tool("ops_health", "Check health", z.object({}), async () => {
   const r = await opsFetch("/ops/health");
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
-// 2. List Files
 mcp.tool("ops_list_files", "List files", z.object({ path: z.string() }), async ({ path }) => {
   const r = await opsFetch(`/ops/files?path=${encodeURIComponent(path)}`);
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
-// 3. Read File
 mcp.tool("ops_read_file", "Read file", z.object({ path: z.string() }), async ({ path }) => {
   const r = await opsFetch(`/ops/file?path=${encodeURIComponent(path)}`);
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
-// 4. Write File (The Fixer ✍️)
+// ✍️ أداة الكتابة (الأهم)
 mcp.tool("ops_write_file", "Write content to file (Full)", z.object({
   path: z.string().describe("Relative path e.g. app/Models/User.php"),
   content: z.string().describe("Full file content")
@@ -57,30 +54,28 @@ mcp.tool("ops_write_file", "Write content to file (Full)", z.object({
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
-// 5. Artisan
 mcp.tool("ops_run_artisan", "Run artisan", z.object({ command: z.string() }), async ({ command }) => {
   const r = await opsFetch("/ops/artisan", { method: "POST", body: { command } });
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
-// 6. DB Select
 mcp.tool("ops_db_select", "Run SQL", z.object({ sql: z.string() }), async ({ sql }) => {
   const r = await opsFetch("/ops/db/select", { method: "POST", body: { sql } });
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
-// 7. Tail Log
 mcp.tool("ops_tail_log", "Read log", z.object({ lines: z.number().default(200) }), async ({ lines }) => {
   const r = await opsFetch(`/ops/log/tail?lines=${lines}`);
   return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
 });
 
-// --- Server & Transport Setup ---
+// --- Server Setup ---
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
-app.get("/", (req, res) => res.send("MCP Writer Mode Active (v2.6) 🚀"));
+// صفحة ترحيب للتأكد من العمل
+app.get("/", (req, res) => res.send("MCP v3.0 Writer Mode - Ready 🚀"));
 
 const transports = new Map();
 
@@ -91,9 +86,11 @@ function checkAuth(req) {
   return h.includes(MCP_AUTH_TOKEN) || k.includes(MCP_AUTH_TOKEN);
 }
 
-// 1. مسار GET (مهم جداً لفتح الاتصال SSE) - هذا ما كان ينقصك!
+// نقطة الاتصال SSE (GET)
 app.get("/mcp", async (req, res) => {
   if (!checkAuth(req)) return res.status(401).send("Unauthorized");
+
+  console.log("📡 Client Connected via SSE");
 
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => crypto.randomUUID(),
@@ -106,7 +103,7 @@ app.get("/mcp", async (req, res) => {
   await transport.handleRequest(req, res);
 });
 
-// 2. مسار POST (مهم لاستقبال الأوامر JSON-RPC)
+// نقطة الأوامر JSON-RPC (POST)
 app.post("/mcp", async (req, res) => {
   if (!checkAuth(req)) return res.status(401).send("Unauthorized");
 
@@ -114,6 +111,7 @@ app.post("/mcp", async (req, res) => {
   const transport = transports.get(String(sessionId));
 
   if (!transport) {
+    console.log("❌ Session Not Found for POST");
     return res.status(404).send("Session not found");
   }
 
