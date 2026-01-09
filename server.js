@@ -144,4 +144,101 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   if (name === "ops_tail_log") {
     const lines = Math.max(10, Math.min(Number(args?.lines ?? 200), 2000));
-    const r = await opsFetch(`/ops/log/tail?lines=${lin
+    const r = await opsFetch(`/ops/log/tail?lines=${lines}`);
+    return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+  }
+
+  if (name === "ops_run_artisan") {
+    const command = String(args?.command ?? "");
+    const r = await opsFetch("/ops/artisan", { method: "POST", body: { command } });
+    return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+  }
+
+  if (name === "ops_db_select") {
+    const sql = String(args?.sql ?? "");
+    const r = await opsFetch("/ops/db/select", { method: "POST", body: { sql } });
+    return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+  }
+
+  if (name === "ops_read_file") {
+    const path = encodeURIComponent(String(args?.path ?? ""));
+    const r = await opsFetch(`/ops/file?path=${path}`);
+    return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
+  }
+
+  return { content: [{ type: "text", text: `Unknown tool: ${name}` }] };
+});
+
+// --- Streamable HTTP session store
+const transports = new Map(); // sessionId -> transport
+
+// OPTIONS (CORS preflight)
+app.options("/mcp", (req, res) => {
+  setCors(res);
+  res.status(204).send();
+});
+
+// POST: init + client->server messages
+app.post("/mcp", requireMcpAuth, async (req, res) => {
+  try {
+    setCors(res);
+
+    const sessionId = req.headers["mcp-session-id"];
+    let transport;
+
+    if (sessionId && transports.has(sessionId)) {
+      transport = transports.get(sessionId);
+    } else if (!sessionId && isInitializeRequest(req.body)) {
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (newSessionId) => {
+          transports.set(newSessionId, transport);
+        },
+      });
+
+      transport.onclose = () => {
+        if (transport.sessionId) transports.delete(transport.sessionId);
+      };
+
+      await mcpServer.connect(transport);
+    } else {
+      res.status(400).json({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Bad Request: No valid session ID provided" },
+        id: null,
+      });
+      return;
+    }
+
+    await transport.handleRequest(req, res, req.body);
+  } catch (e) {
+    console.error(e);
+    res.status(500).send("MCP error");
+  }
+});
+
+// GET/DELETE: streaming + close
+async function handleSessionRequest(req, res) {
+  try {
+    setCors(res);
+
+    const sessionId = req.headers["mcp-session-id"];
+    if (!sessionId || !transports.has(sessionId)) {
+      res.status(400).send("Invalid or missing session ID");
+      return;
+    }
+
+    const transport = transports.get(sessionId);
+    await transport.handleRequest(req, res);
+  } catch (e) {
+    console.error(e);
+    res.status(500).send("MCP error");
+  }
+}
+
+app.get("/mcp", requireMcpAuth, handleSessionRequest);
+app.delete("/mcp", requireMcpAuth, handleSessionRequest);
+
+app.listen(PORT, () => {
+  console.log(`MCP server listening on ${PORT}`);
+});
