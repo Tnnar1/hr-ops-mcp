@@ -99,9 +99,16 @@ server.setRequestHandler("tools/call", async (req) => {
 });
 
 app.post("/mcp", async (req, res) => {
-  const transport = new StreamableHTTPServerTransport(req, res);
-  await server.connect(transport);
+  try {
+    const transport = new StreamableHTTPServerTransport(req, res);
+    await server.connect(transport);
+    return;
+  } catch (e) {
+    console.error(e);
+    res.status(500).send("MCP error");
+  }
 });
+
 
 app.get("/", (req, res) => res.send("OK"));
 
