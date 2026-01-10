@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import crypto from "crypto";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -9,11 +10,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 // --------------------
 const OPS_BASE_URL = (process.env.OPS_BASE_URL || "").replace(/\/+$/, "");
 const OPS_KEY = (process.env.OPS_KEY || "").trim();
-
-// Token لحماية MCP endpoint (اختياري لكن أنصحك بشدة)
-// ضعه في Render Env Vars: MCP_AUTH_TOKEN=شيء_طويل_وعشوائي
 const MCP_AUTH_TOKEN = (process.env.MCP_AUTH_TOKEN || "").trim();
-
 const PORT = Number(process.env.PORT || 10000);
 
 if (!OPS_BASE_URL || !OPS_KEY) {
@@ -23,6 +20,7 @@ if (!OPS_BASE_URL || !OPS_KEY) {
 
 console.log(`✅ OPS_BASE_URL=${OPS_BASE_URL}`);
 console.log(`✅ MCP_AUTH_TOKEN ${MCP_AUTH_TOKEN ? "is set" : "is NOT set (endpoint is open!)"}`);
+console.log(`✅ Listening on PORT=${PORT}`);
 
 // --------------------
 // Auth helper
@@ -42,50 +40,60 @@ function isAuthed(req) {
 }
 
 // --------------------
-// opsFetch helper (FIXED: JSON.stringify body)
+// opsFetch helper (JSON + timeout)
 // --------------------
 async function opsFetch(path, { method = "GET", body, headers = {} } = {}) {
   const url = `${OPS_BASE_URL}${path}`;
 
-  const reqInit = {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Ops-Key": OPS_KEY,
-      ...headers,
-    },
-  };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
 
-  if (body !== undefined) {
-    reqInit.body = typeof body === "string" ? body : JSON.stringify(body);
-  }
-
-  const res = await fetch(url, reqInit);
-  const text = await res.text();
-
-  let data;
   try {
-    data = JSON.parse(text);
-  } catch {
-    data = text;
-  }
+    const reqInit = {
+      method,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-Ops-Key": OPS_KEY,
+        ...headers,
+      },
+    };
 
-  return { ok: res.ok, status: res.status, data };
+    if (body !== undefined) {
+      reqInit.body = typeof body === "string" ? body : JSON.stringify(body);
+    }
+
+    const res = await fetch(url, reqInit);
+    const text = await res.text();
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+
+    return { ok: res.ok, status: res.status, data };
+  } catch (e) {
+    const msg = e?.name === "AbortError" ? "Timeout calling OPS" : String(e);
+    return { ok: false, status: 0, data: { error: msg } };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 // --------------------
-// MCP server factory (tools registered هنا)
+// MCP server factory (per-session)
 // --------------------
 function buildMcpServer() {
-  const mcp = new McpServer({ name: "hr-ops-mcp", version: "3.1.0" });
+  const mcp = new McpServer({ name: "hr-ops-mcp", version: "3.2.0" });
 
-  // Health
   mcp.tool("ops_health", "Health check for Ops Gateway", z.object({}), async () => {
     const r = await opsFetch("/ops/health");
     return { content: [{ type: "text", text: JSON.stringify(r.data, null, 2) }] };
   });
 
-  // Logs
   mcp.tool(
     "ops_tail_log",
     "Tail laravel.log via Ops Gateway",
@@ -96,7 +104,6 @@ function buildMcpServer() {
     }
   );
 
-  // Artisan (allowlisted on Laravel side)
   mcp.tool(
     "ops_run_artisan",
     "Run an allowlisted artisan command",
@@ -107,7 +114,6 @@ function buildMcpServer() {
     }
   );
 
-  // DB select
   mcp.tool(
     "ops_db_select",
     "Run SELECT query (read-only)",
@@ -118,7 +124,6 @@ function buildMcpServer() {
     }
   );
 
-  // File list
   mcp.tool(
     "ops_list_files",
     "List files in server path (allowed paths only)",
@@ -129,7 +134,6 @@ function buildMcpServer() {
     }
   );
 
-  // Read file
   mcp.tool(
     "ops_read_file",
     "Read an allowed server-side file path",
@@ -140,7 +144,6 @@ function buildMcpServer() {
     }
   );
 
-  // Write file (Dangerous, but you asked for it)
   mcp.tool(
     "ops_write_file",
     "Write full content to a file path (VERY powerful)",
@@ -162,7 +165,7 @@ const app = express();
 app.use(
   cors({
     origin: "*",
-    methods: ["POST", "GET", "OPTIONS"],
+    methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-Api-Key", "X-Mcp-Auth"],
   })
 );
@@ -173,32 +176,67 @@ app.use(express.json({ limit: "50mb" }));
 app.get("/", (req, res) => res.send("OK"));
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
-// Streamable HTTP MCP endpoint (POST only)
-app.post("/mcp", async (req, res) => {
+// --------------------
+// Session-based MCP (recommended for ChatGPT MCP UI)
+// --------------------
+const sessions = new Map(); // sessionId -> { transport, server }
+
+app.get("/mcp", async (req, res) => {
   try {
     if (!isAuthed(req)) return res.status(401).send("Unauthorized");
 
-    // Stateless transport: no sessions
+    // SSE headers
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+
+    const sessionId = crypto.randomUUID();
+
     const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
+      sessionIdGenerator: () => sessionId,
+      onsessioninitialized: () => {
+        // Nothing extra needed; we already know the sessionId
+        console.log(`✨ MCP session initialized: ${sessionId}`);
+      },
     });
 
     const server = buildMcpServer();
+    sessions.set(sessionId, { transport, server });
 
-    res.on("close", async () => {
-      try { await transport.close(); } catch {}
+    transport.onclose = async () => {
+      console.log(`🛑 MCP session closed: ${sessionId}`);
+      sessions.delete(sessionId);
+      try { await transport.close?.(); } catch {}
       try { await server.close?.(); } catch {}
-    });
+    };
 
     await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
+    await transport.handleRequest(req, res);
   } catch (e) {
-    console.error("❌ MCP error:", e);
+    console.error("❌ MCP GET error:", e);
     if (!res.headersSent) res.status(500).send("MCP error");
   }
 });
 
-// Optional: reject other methods clearly
-app.all("/mcp", (req, res) => res.status(405).send("Method Not Allowed (use POST)"));
+app.post("/mcp", async (req, res) => {
+  try {
+    if (!isAuthed(req)) return res.status(401).send("Unauthorized");
+
+    const sessionId = String(req.query.sessionId || "");
+    if (!sessionId) {
+      // Fallback: some clients might POST without sessionId (not typical for ChatGPT UI)
+      return res.status(400).send("Missing sessionId. Use GET /mcp first, then POST /mcp?sessionId=...");
+    }
+
+    const entry = sessions.get(sessionId);
+    if (!entry) return res.status(404).send("Session not found");
+
+    await entry.transport.handleRequest(req, res);
+  } catch (e) {
+    console.error("❌ MCP POST error:", e);
+    if (!res.headersSent) res.status(500).send("MCP error");
+  }
+});
 
 app.listen(PORT, () => console.log(`🚀 MCP server listening on port ${PORT}`));
